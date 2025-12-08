@@ -7,6 +7,7 @@ from github import Github, GithubException, Auth
 
 
 
+
 STATE_FILE="tracked_repos.json"
 BACKDATE_COMMITS_TO_FOLDER_DATE = False
 PARENT_DIRECTORIES = ["../Projects_test"]
@@ -101,18 +102,16 @@ def handle_conflict_rename_local(repo, folder_path):
         print("Aucun conflit détecté dans l'index.")
         return False
 
-    print(f"⚠ Conflits détectés dans {folder_path}. Résolution automatique en cours...")
+    print(f"⚠ Conflits détectés dans {folder_path}. Résolution en cours...")
 
     try:
         unmerged_blobs = repo.index.unmerged_blobs()
 
         for file_path in unmerged_blobs:
-            # Générer un nom unique pour la version locale
             base, ext = os.path.splitext(file_path)
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            local_renamed_path = f"{base}_local_conflict_{timestamp}{ext}"
+            local_renamed_path = f"{base}_local_{timestamp}{ext}"
 
-            # 1. Sauvegarder la version locale
             try:
                 content_local = repo.git.show(f":2:{file_path}")
                 full_local_path = os.path.join(folder_path, local_renamed_path)
@@ -123,19 +122,17 @@ def handle_conflict_rename_local(repo, folder_path):
                 print(f"   ! Erreur sauvegarde locale {file_path}: {e}")
                 continue
 
-            # 2. Accepter la version Distante
             repo.git.checkout("--theirs", file_path)
             print(f"   -> Version distante acceptée pour : {file_path}")
 
-            # 3. Ajouter à l'index
             repo.git.add(file_path)
             repo.git.add(local_renamed_path)
 
-        # 4. Commit de la résolution UNIQUEMENT (Pas de push ici)
+
         commit_msg = "Auto-resolve: Rename local conflicts and keep remote version"
-        repo.index.commit(commit_msg)
-        print("✓ Conflits résolus et commités localement (prêt pour le push).")
+        repo.git.commit("-m", commit_msg)
         
+        print("✓ Conflits résolus et commités localement (Merge Commit créé).")
         return True
 
     except Exception as e:
@@ -148,22 +145,27 @@ def pull_updates(folder_path):
     try:
         repo = Repo(folder_path)
         
-        # On vérifie si la remote existe
         if 'origin' not in repo.remotes:
             print(f"No remote 'origin' found for {folder_path}.")
             return False
             
-        origin = repo.remote('origin')
-        
         try:
             current_branch = repo.active_branch.name
         except TypeError:
             print(f"couldn't determine current branch. cannot pull updates.")
             return False
-        
-        # FIX: On force l'utilisation de --no-rebase pour créer un commit de fusion
-        # Cela résout l'erreur "Need to specify how to reconcile divergent branches"
-        print(f"Pulling with --no-rebase strategy from {current_branch}...")
+
+        # Nettoyage d'un ancien état de merge incomplet
+        git_dir = os.path.join(folder_path, '.git')
+        if os.path.exists(os.path.join(git_dir, 'MERGE_HEAD')):
+            print(f"⚠ Unfinished merge detected in {folder_path}. cleaning state...")
+            try:
+                repo.git.merge('--abort')
+                print("   -> Old merge aborted. Repository is clean.")
+            except GitCommandError:
+                pass
+
+        print(f"Pulling from {current_branch}...")
         repo.git.pull('origin', current_branch, '--no-rebase')
 
         print(f"Successfully pulled updates for {folder_path}.")
@@ -171,10 +173,18 @@ def pull_updates(folder_path):
     
     except GitCommandError as e:
         err_msg = str(e)
-        # Gestion des conflits (Code 1 ou message de conflit)
-        if "CONFLICT" in err_msg or "Merge conflict" in err_msg or e.status == 1:
+        if "CONFLICT" in err_msg or "Merge conflict" in err_msg:
             print(f"⚠ Conflict detected during pull in {folder_path}.")
             return handle_conflict_rename_local(repo, folder_path)
+        
+        elif "MERGE_HEAD exists" in err_msg:
+             print(f"⚠ Still stuck in merge state. Attempting force abort...")
+             try:
+                 repo.git.merge('--abort')
+                 return pull_updates(folder_path) 
+             except:
+                 return False
+
         else:
             print(f"Git pull failed in {folder_path}: {e}")
             return False
@@ -260,7 +270,7 @@ def push_updates(folder_path, commit_message):
         print(f"No changes to commit in {folder_path}.")
         return True
     
-    # 2. COMMITTER D'ABORD (C'est la clé pour éviter l'erreur "overwritten by merge")
+    # 2. COMMITTER 
     commit_date = get_commit_date(folder_path)
     repo.index.commit(
         commit_message,
@@ -269,12 +279,9 @@ def push_updates(folder_path, commit_message):
     )
     print(f"Changes committed locally in {folder_path}.")
 
-    # 3. PULL (Récupérer les changements distants et fusionner)
-    # Si un conflit survient, pull_updates le gérera
+    # 3. PULL 
     if not pull_updates(folder_path):
-        print(f"Warning: Pull failed or had conflicts in {folder_path}. Check logs.")
-        # On continue quand même vers le push, car handle_conflict a peut-être résolu le souci
-        # ou alors on veut pousser notre commit local forcé.
+        print(f"Warning: Pull failed or processed conflicts in {folder_path}.")
 
     # 4. PUSH
     try:
@@ -285,9 +292,20 @@ def push_updates(folder_path, commit_message):
     
     try:
         origin = repo.remote('origin')
-        origin.push(refspec=f"{current_branch}:{current_branch}")
-        print(f"Succesfully pushed changes to remote repository from {folder_path}.")
-        return True
+        push_infos = origin.push(refspec=f"{current_branch}:{current_branch}")
+        
+        success = True
+        for info in push_infos:
+            if info.flags & info.ERROR:
+                print(f"✗ Push failed for {info.remote_ref_string}: {info.summary}")
+                success = False
+        
+        if success:
+            print(f"Succesfully pushed changes to remote repository from {folder_path}.")
+            return True
+        else:
+            return False
+
     except Exception as e:
         print(f"Failed to push changes: {e}")
         return False
