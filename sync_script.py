@@ -415,26 +415,13 @@ def sync_projects(github_client, username, state):
 
 def main():
     try:
-        # Charger la configuration
-        print("Loading configuration...")
         token, username, email = load_config()
-        print(f"✓ Loaded config for user: {username}")
-        
-        # Créer le client GitHub
         auth = Auth.Token(token)
         github_client = Github(auth=auth)
-        print("✓ GitHub client created\n")
         
-        # Charger l'état actuel
         state = load_state()
-        print(f"✓ Loaded state ({len(state)} tracked projects)\n")
-        
-        # Synchroniser les projets
         updated_state = sync_projects(github_client, username, state)
-        
-        # Sauvegarder l'état mis à jour
         save_state(updated_state)
-        print("✓ State saved successfully")
         
     except ValueError as e:
         print(f"✗ Configuration error: {e}")
